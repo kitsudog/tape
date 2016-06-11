@@ -263,6 +263,18 @@ def clean_Unity3D(ws_path, level=LEVEL_SOURCE):
     return files
 
 
+def clean_python(ws_path, level=LEVEL_SOURCE):
+    _exists(ws_path, '__init__.py')
+    files = Files('python', ws_path)
+    if level >= LEVEL_PROJECT:
+        # todo识别生成的库
+        files.d('*.pyc')
+        pass
+    if level >= LEVEL_SOURCE:
+        pass
+    return files
+
+
 def list_all(path):
     ret = []
     for f in os.listdir(path):
@@ -324,6 +336,7 @@ def remove(files, dry_run=False, base=None):
 def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False):
     """
 
+    :param dry_run:
     :param level:
     :param ws_path: 目标目录
     :return:
@@ -336,7 +349,7 @@ def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False):
     while len(dirs):
         d = dirs.pop()
         cnt = 0
-        for func in [clean_Unity3D, clean_Cocos2dx, clean_android, clean_ios]:
+        for func in [clean_Unity3D, clean_Cocos2dx, clean_android, clean_ios, clean_python]:
             ret = try_run(func, exit_when_fail=False, verbos=False)(d, level)
             # TODO: 智能的排除已经处理的目录
             # 单一清理
