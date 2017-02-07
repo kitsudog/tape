@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 # -*- coding:utf-8 -*-
+from __future__ import print_function
+
 import glob
 import os
 import re
@@ -38,14 +40,25 @@ class Files:
     def __init__(self, title, base):
         self.title = title
         self.deletes = []
+        self.delete_file_set = set()
         self.base = base
 
     def d(self, dir_path):
-        path = os.path.join(self.base, dir_path)
-        self.deletes.append((self.title, path))
+        for path in glob.glob(os.path.join(self.base, dir_path)):
+            path = os.path.realpath(path)
+            if path in self.delete_file_set:
+                # 已经添加过了
+                return
+            self.deletes.append((self.title, path))
+            self.delete_file_set.add(path)
 
     def extends(self, files):
-        self.deletes.extend(files.deletes)
+        for title, d in files.deletes:
+            if d in self.delete_file_set:
+                # 已经添加过了
+                continue
+            self.deletes.append((title, d))
+            self.delete_file_set.add(d)
 
     def all(self):
         ret = []
@@ -59,26 +72,26 @@ class Files:
 def debug(msg, args=None):
     if args is not None:
         msg = msg % args
-    print '[DEBUG] ' + msg
+    print('[DEBUG] ' + msg)
 
 
 def error(msg, args=None):
     if args is not None:
         msg = msg % args
-    print '[ERROR] ' + msg
+    print('[ERROR] ' + msg)
 
 
 def fatal(msg, args=None):
     if args is not None:
         msg = msg % args
-    print '[FATAL] ' + msg
+    print('[FATAL] ' + msg)
     sys.exit(1)
 
 
 def info(msg, args=None):
     if args is not None:
         msg = msg % args
-    print '[INFO_] ' + msg
+    print('[INFO_] ' + msg)
 
 
 def try_run(func, exit_when_fail=True, verbos=True):
@@ -191,6 +204,7 @@ def clean_ios(ws_path, level=LEVEL_SOURCE):
             # TODO: 系统中的相关文件
         if level >= LEVEL_SOURCE:
             files.extends(vcs)
+    # todo: ~/Library/Developer/Xcode/DerivedData
     return files
 
 
@@ -213,7 +227,7 @@ def clean_android(ws_path, level=LEVEL_SOURCE):
     return files
 
 
-def clean_Cocos2dx(ws_path, level=LEVEL_SOURCE):
+def clean_cocos2dx(ws_path, level=LEVEL_SOURCE):
     # 检测类型
     _exists(ws_path, 'cocos2d')
     _exists_dir(ws_path, 'Classes')
@@ -240,7 +254,7 @@ def clean_Cocos2dx(ws_path, level=LEVEL_SOURCE):
     return files
 
 
-def clean_Unity3D(ws_path, level=LEVEL_SOURCE):
+def clean_unity3d(ws_path, level=LEVEL_SOURCE):
     # 检测类型
     _exists_dir(ws_path, 'Assets')
     _exists_dir(ws_path, 'ProjectSettings')
@@ -251,6 +265,7 @@ def clean_Unity3D(ws_path, level=LEVEL_SOURCE):
         # todo识别生成的库
         pass
     if level >= LEVEL_SOURCE:
+        files.extends(vcs)
         # Unity3D 生成的
         files.d('Library')
         files.d('Temp')
@@ -259,7 +274,6 @@ def clean_Unity3D(ws_path, level=LEVEL_SOURCE):
         files.d('*.csproj')
         files.d('*.sln')
         files.d('*.userprefs')
-        files.extends(vcs)
     return files
 
 
@@ -283,13 +297,22 @@ def list_all(path):
     return ret
 
 
-def list_dir(path):
-    ret = []
+def list_dir(path, remove_dir_set, base, out_links):
+    ret = set()
     for f in os.listdir(path):
         f = os.path.join(path, f)
         if os.path.isdir(f):
-            ret.append(f)
-    return ret
+            # 针对符号链接要排除处理过的
+            real = os.path.realpath(f)
+            if out_links or real.startswith(base):
+                ret.add(real)
+            else:
+                # 外部的
+                info("Pass [%s]=>[%s]" % (format_path(f, base), real))
+                continue
+    ret -= remove_dir_set
+    remove_dir_set.update(ret)
+    return sorted(ret)
 
 
 def size(file_or_dir):
@@ -311,20 +334,28 @@ def format_path(path, base=None):
     return path
 
 
-def remove(files, dry_run=False, base=None):
+def remove(files, dry_run=False, base=None, remove_dir_set=set()):
     total = 0
+
+    def mark_dir(_):
+        if os.path.islink(_):
+            info(_)
+            remove_dir_set.add(_)
+
     if dry_run:
-        for t, f in files.all():
-            tmp = size(f)
+        for t, f_path in files.all():
+            mark_dir(f_path)
+            tmp = size(f_path)
             if base is not None:
-                f = format_path(f, base)
-            if os.path.isfile(f):
+                f = format_path(f_path, base)
+            if os.path.isfile(f_path):
                 info("%s => %s [%s]" % (t, f, human_size(tmp)))
             else:
-                info("%s => %s/* [%s]" % (t, f, human_size(tmp)))
+                info("%s => %s%s* [%s]" % (t, f, os.path.sep, human_size(tmp)))
             total += tmp
     else:
         for t, f in files.all():
+            mark_dir(f)
             total += size(f)
             if os.path.isfile(f) or os.path.islink(f):
                 _remove(f)
@@ -333,12 +364,13 @@ def remove(files, dry_run=False, base=None):
     return total
 
 
-def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False):
+def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False, out_links=False):
     """
 
     :param dry_run:
     :param level:
     :param ws_path: 目标目录
+    :param out_links: 清理外链
     :return:
     """
     if not os.path.isdir(ws_path):
@@ -346,10 +378,11 @@ def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False):
 
     dirs = [ws_path]
     total = 0
+    remove_dir_set = set()
     while len(dirs):
         d = dirs.pop()
         cnt = 0
-        for func in [clean_Unity3D, clean_Cocos2dx, clean_android, clean_ios, clean_python]:
+        for func in [clean_unity3d, clean_cocos2dx, clean_android, clean_ios, clean_python]:
             ret = try_run(func, exit_when_fail=False, verbos=False)(d, level)
             # TODO: 智能的排除已经处理的目录
             # 单一清理
@@ -357,10 +390,10 @@ def cleaner(ws_path, level=LEVEL_SOURCE, dry_run=False):
                 continue
             else:
                 cnt += 1
-                total += remove(ret, dry_run=dry_run, base=ws_path)
+                total += remove(ret, dry_run=dry_run, base=ws_path, remove_dir_set=remove_dir_set)
         if cnt == 0:
             # 当前目录没有匹配的规则
-            dirs.extend(list_dir(d))
+            dirs.extend(list_dir(d, remove_dir_set, base=ws_path, out_links=out_links))
     info('Total[%s]', human_size(total))
 
 
@@ -368,12 +401,31 @@ def main(argv=None):
     if argv is None:
         argv = sys.argv
     parser = OptionParser("Usage: %prog [options] <path>")
-    parser.add_option("-d", "--dry", action="store_true", dest="dry", help="no remove just list", default=True)
+    parser.add_option("-d", "--dry", action="store_true", dest="dry", help="no remove just list", default=False)
+    parser.add_option("-O", "--out-links", action="store_true", dest="out_links", help="allow links out of workspace",
+                      default=False)
+    parser.add_option("-S", "--source-only", action="store_true", dest="source_only", help="keep source only",
+                      default=False)
     (options, args) = parser.parse_args(argv)
-    if len(args) < 1:
+    if len(args) < 2:
         parser.print_help()
     else:
-        cleaner(ws_path=args[1], dry_run=options.dry)
+        ws_path = args[1]
+        if str(ws_path).endswith(os.path.sep):
+            ws_path = str(ws_path)[:-len(os.path.sep)]
+        if not os.path.exists(ws_path):
+            sys.stderr.write('path [%s] not exists\n' % ws_path)
+            exit(1)
+        if not os.path.isdir(ws_path):
+            sys.stderr.write('path [%s] not dir\n' % ws_path)
+            exit(1)
+        if os.path.islink(ws_path):
+            ws_path = os.path.realpath(ws_path)
+        cleaner(ws_path=ws_path,
+                level=LEVEL_SOURCE if options.source_only else LEVEL_PROJECT,
+                dry_run=options.dry,
+                out_links=options.out_links
+                )
 
 
 if __name__ == '__main__':
